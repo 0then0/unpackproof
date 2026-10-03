@@ -1,0 +1,10 @@
+{
+  "schema_version": "unpackproof.config.v1",
+  "name": "controlled-noop",
+  "image": "unpackproof/python-tarfile:0.1",
+  "command": ["/unpackproof-guest", "adapter", "no-op", "--archive", "{archive}", "--destination", "{destination}"],
+  "cases": ["file", "nested"],
+  "link_policy": "allow",
+  "overwrite_policy": "replace",
+  "limits": {"timeout": "5s", "memory": "128m", "cpus": "1", "pids": 32, "storage_tmpfs": "8m", "max_captured_output": 8192}
+}

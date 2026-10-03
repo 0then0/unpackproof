@@ -1,0 +1,28 @@
+{
+  "schema_version": "unpackproof.config.v1",
+  "name": "python-tarfile",
+  "image": "unpackproof/python-tarfile:0.1",
+  "command": [
+    "/adapters/python-tarfile.py",
+    "--archive",
+    "{archive}",
+    "--destination",
+    "{destination}",
+    "--link-policy",
+    "allow",
+    "--overwrite-policy",
+    "replace"
+  ],
+  "target_version_command": ["/adapters/python-tarfile.py", "--version"],
+  "cases": ["file", "nested", "empty", "unicode", "pax", "duplicate", "existing", "symlink", "hardlink", "truncated"],
+  "link_policy": "allow",
+  "overwrite_policy": "replace",
+  "limits": {
+    "timeout": "10s",
+    "memory": "256m",
+    "cpus": "1",
+    "pids": 64,
+    "storage_tmpfs": "16m",
+    "max_captured_output": 65536
+  }
+}

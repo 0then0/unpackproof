@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: docker/setup-buildx-action@v3
+      - name: Unit tests
+        run: |
+          go test ./...
+          go vet ./...
+      - name: Build CLIs
+        run: |
+          go build -o bin/unpackproof ./cmd/unpackproof
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bin/unpackproof-guest-linux-amd64 ./cmd/unpackproof-guest
+      - name: Build adapter images
+        run: |
+          docker build -t unpackproof/python-tarfile:0.1 examples/python-tarfile
+          docker build -t unpackproof/node-tar:0.1 examples/node-tar
+      - name: Docker regression tests
+        env:
+          UNPACKPROOF_GUEST: ${{ github.workspace }}/bin/unpackproof-guest-linux-amd64
+          UNPACKPROOF_CLI: ${{ github.workspace }}/bin/unpackproof
+          UNPACKPROOF_REPORT_ROOT: ${{ github.workspace }}/reports/integration
+        run: go test -tags=integration ./internal/up -count=1 -timeout=8m
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unpackproof-reports
+          path: reports/
+          if-no-files-found: ignore

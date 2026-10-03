@@ -25,6 +25,13 @@ profile.cov
 go.work
 go.work.sum
 
+# Local task artifacts
+bin/
+reports/
+.tmp-npm-cache/
+.gocache/
+.gomodcache/
+
 # env file
 .env
 

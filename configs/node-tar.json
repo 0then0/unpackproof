@@ -1,0 +1,29 @@
+{
+  "schema_version": "unpackproof.config.v1",
+  "name": "node-tar",
+  "image": "unpackproof/node-tar:0.1",
+  "command": [
+    "node",
+    "/opt/unpackproof-node-adapter/adapter.mjs",
+    "--archive",
+    "{archive}",
+    "--destination",
+    "{destination}",
+    "--link-policy",
+    "allow",
+    "--overwrite-policy",
+    "replace"
+  ],
+  "target_version_command": ["node", "/opt/unpackproof-node-adapter/adapter.mjs", "--version"],
+  "cases": ["file", "nested", "empty", "unicode", "pax", "duplicate", "existing", "symlink", "hardlink", "truncated"],
+  "link_policy": "allow",
+  "overwrite_policy": "replace",
+  "limits": {
+    "timeout": "10s",
+    "memory": "256m",
+    "cpus": "1",
+    "pids": 64,
+    "storage_tmpfs": "16m",
+    "max_captured_output": 65536
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "unpackproof-node-tar-adapter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "tar": "7.5.22"
+  },
+  "engines": {
+    "node": "24.21.0"
+  }
+}

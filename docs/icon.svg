@@ -1,0 +1,41 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="96"
+  height="96"
+  viewBox="0 0 96 96"
+  role="img"
+  aria-labelledby="title desc"
+>
+  <title id="title">UnpackProof</title>
+  <desc
+    id="desc"
+  >An archive box opens into a file tree with a verification check.</desc>
+  <style>
+    @media (prefers-color-scheme: dark) {
+      .outline { stroke: #cbd5e1; }
+      .check { stroke: #2dd4bf; }
+    }
+  </style>
+  <g
+    class="outline"
+    fill="none"
+    stroke="#334155"
+    stroke-width="3"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <path d="m16 24 20-10 20 10v22L36 56 16 46Z" />
+    <path d="m16 24 20 10 20-10M36 34v22M26 19l20 10" />
+    <path d="M36 64v10h22M58 64v20M58 64h12M58 84h12" />
+    <path d="M75 58h9v12h-9zM75 78h9v12h-9z" />
+  </g>
+  <path
+    class="check"
+    d="m61 38 7 7 15-17"
+    fill="none"
+    stroke="#0f766e"
+    stroke-width="4"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>
