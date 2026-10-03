@@ -32,6 +32,7 @@ type CaseReport struct {
 	Image           ImageReport     `json:"image"`
 	TargetVersion   string          `json:"target_version,omitempty"`
 	ReportError     string          `json:"report_error,omitempty"`
+	RecoveryReport  string          `json:"recovery_report,omitempty"`
 	SchemaVersion   string          `json:"schema_version"`
 	Case            CaseSpec        `json:"case"`
 	Execution       ExecutionReport `json:"execution"`
@@ -98,7 +99,7 @@ func SaveJSON(path string, v any) error {
 
 func HumanCase(r CaseReport) string {
 	line := fmt.Sprintf("%s %q", r.Outcome, r.Case.ID)
-	if len(r.Findings) > 0 || r.ReportError != "" || (r.Cleanup.Attempted && !r.Cleanup.OK) {
+	if len(r.Findings) > 0 || r.ReportError != "" || r.RecoveryReport != "" || r.Cleanup.Error != "" {
 		line += "\n"
 	}
 	for _, f := range r.Findings {
@@ -111,7 +112,10 @@ func HumanCase(r CaseReport) string {
 	if r.ReportError != "" {
 		line += fmt.Sprintf("  - report-error: %q\n", r.ReportError)
 	}
-	if r.Cleanup.Attempted && !r.Cleanup.OK {
+	if r.RecoveryReport != "" {
+		line += fmt.Sprintf("  - recovery-report: %q\n", r.RecoveryReport)
+	}
+	if r.Cleanup.Error != "" {
 		line += fmt.Sprintf("  - cleanup-error: %q\n", r.Cleanup.Error)
 	}
 	return line

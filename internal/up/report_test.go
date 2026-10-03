@@ -9,7 +9,7 @@ import (
 )
 
 func TestHumanReportEscapesUntrustedStrings(t *testing.T) {
-	r := CaseReport{Case: CaseSpec{ID: "file"}, Outcome: OutcomeFAIL, Findings: []Finding{{ID: "unexpected-object", Path: "extra\nPASS forged\x1b[31m", Message: "message\r\x1b"}}}
+	r := CaseReport{Case: CaseSpec{ID: "file"}, Outcome: OutcomeFAIL, RecoveryReport: "/tmp/recovery\nPASS forged\x1b", Cleanup: CleanupReport{Error: "deferred\r\x1b"}, Findings: []Finding{{ID: "unexpected-object", Path: "extra\nPASS forged\x1b[31m", Message: "message\r\x1b"}}}
 	text := HumanCase(r)
 	if strings.ContainsAny(text, "\r\x1b") || strings.Contains(text, "\nPASS forged") || !strings.Contains(text, `\nPASS forged\x1b`) {
 		t.Fatalf("unsafe human output: %q", text)

@@ -93,6 +93,7 @@ func Run(ctx context.Context, cfg Config, guestPath, outDir string, human io.Wri
 		}
 	}
 	hadBad := len(report.Errors) > 0
+	var recoveryPath string
 	for _, id := range cfg.Cases {
 		if ctx.Err() != nil {
 			break
@@ -102,6 +103,10 @@ func Run(ctx context.Context, cfg Config, guestPath, outDir string, human io.Wri
 		if cr.Outcome != OutcomePASS || cr.ReportError != "" || !cr.Cleanup.OK {
 			hadBad = true
 		}
+		if cr.RecoveryReport != "" || !cr.Cleanup.Attempted {
+			recoveryPath = cr.RecoveryReport
+			break // Do not allocate more resources after losing the report directory.
+		}
 	}
 	if ctx.Err() != nil {
 		report.Errors = append(report.Errors, ctx.Err().Error())
@@ -109,6 +114,10 @@ func Run(ctx context.Context, cfg Config, guestPath, outDir string, human io.Wri
 	}
 	report.FinishedAt = time.Now().UTC()
 	if err := SaveJSON(filepath.Join(outDir, "run.json"), report); err != nil {
+		if recoveryPath != "" {
+			report.Errors = append(report.Errors, fmt.Sprintf("save run report: %v", err))
+			err = errors.Join(err, SaveJSON(recoveryPath, report))
+		}
 		return fmt.Errorf("save run report: %w", err)
 	}
 	if hadBad {
@@ -176,25 +185,64 @@ func (r *dockerRunner) finishWithCleanup(id, outDir string, cr CaseReport) CaseR
 	}
 	index := len(r.report.Cases)
 	r.report.Cases = append(r.report.Cases, cr)
-	saveCase := func() {
-		if err := SaveJSON(filepath.Join(outDir, id+".json"), cr); err != nil {
-			cr.ReportError = errors.Join(errors.New("case report persistence failed"), err).Error()
+	recordError := func(message string, err error) {
+		if err != nil {
+			previous := errors.New(cr.ReportError)
+			if cr.ReportError == "" {
+				previous = nil
+			}
+			cr.ReportError = errors.Join(previous, fmt.Errorf("%s: %w", message, err)).Error()
 		}
 		r.report.Cases[index] = cr
 	}
-	// Both the standalone case and the run checkpoint contain the verdict and
-	// evidence before any owned container or volume is removed.
-	saveCase()
-	if err := SaveJSON(filepath.Join(outDir, "run.json"), r.report); err != nil {
-		cr.ReportError = errors.Join(errors.New("run checkpoint persistence failed"), err).Error()
+	persistPrimary := func() bool {
+		caseErr := SaveJSON(filepath.Join(outDir, id+".json"), cr)
+		recordError("case report persistence failed", caseErr)
+		runErr := SaveJSON(filepath.Join(outDir, "run.json"), r.report)
+		recordError("run checkpoint persistence failed", runErr)
+		return caseErr == nil || runErr == nil
+	}
+	// Require at least one durable copy of the verdict and evidence before
+	// destroying the tmpfs fixture, including when both primary writes fail.
+	if !persistPrimary() {
+		dir, err := os.MkdirTemp("", "unpackproof-recovery-"+r.runID+"-")
+		if err == nil {
+			cr.RecoveryReport = filepath.Join(dir, "run.json")
+			r.report.Cases[index] = cr
+			err = SaveJSON(cr.RecoveryReport, r.report)
+			if err != nil {
+				os.RemoveAll(dir)
+				cr.RecoveryReport = ""
+			}
+		}
+		if err != nil {
+			recordError("recovery report persistence failed", err)
+			stopErr := r.stopTarget(id)
+			cr.Cleanup = CleanupReport{Error: errors.Join(fmt.Errorf("cleanup deferred: evidence could not be saved; resources retained with org.unpackproof.run=%s and org.unpackproof.case=%s; keeper retains its bounded lifetime", r.runID, id), stopErr).Error()}
+			r.report.Cases[index] = cr
+			return cr
+		}
 	}
 	cr.Cleanup = r.cleanupCase(id)
-	saveCase()
-	if err := SaveJSON(filepath.Join(outDir, "run.json"), r.report); err != nil {
-		cr.ReportError = errors.Join(errors.New("run checkpoint persistence failed"), err).Error()
-		r.report.Cases[index] = cr
+	persistPrimary()
+	if cr.RecoveryReport != "" {
+		recordError("recovery checkpoint update failed", SaveJSON(cr.RecoveryReport, r.report))
 	}
 	return cr
+}
+
+func (r *dockerRunner) stopTarget(id string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	name := "unpackproof-" + r.runID + "-" + id + "-target"
+	var out bytes.Buffer
+	if err := docker(ctx, &out, nil, "ps", "-q", "--filter", "label=org.unpackproof.run="+r.runID, "--filter", "label=org.unpackproof.case="+id, "--filter", "name=^/"+name+"$"); err != nil {
+		return err
+	}
+	if ids := strings.Fields(out.String()); len(ids) > 0 {
+		return docker(ctx, nil, nil, append([]string{"kill"}, ids...)...)
+	}
+	return nil
 }
 
 func (r *dockerRunner) cleanupCase(id string) CleanupReport {

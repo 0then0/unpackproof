@@ -93,6 +93,8 @@ bin/unpackproof run \
 
 Case reports and a complete run checkpoint are written before cleanup is attempted. They include image identity, target version when configured, the normalized command and limits, execution disposition, and filesystem evidence. Persistence or cleanup errors make the CLI return nonzero while retaining the observed case verdict. Use a separate output directory for each concurrent run.
 
+If both primary report writes fail, a full checkpoint is saved in a private `unpackproof-recovery-*` directory under the OS temporary directory (`TMPDIR` when set). The human output and `recovery_report` field identify its path. The run stops after this case; cleanup proceeds only after evidence has been saved. Recovery files are retained for inspection, so copy them before temporary-directory cleanup. If recovery storage also fails, the target is stopped with a deadline and destructive cleanup is deferred. The reported run/case labels identify retained resources; the keeper still expires on its original deadline, after which tmpfs contents may be lost.
+
 `SIGINT` and `SIGTERM` cancel execution. The target is stopped before observation, and cleanup uses a separate 10-second deadline. Resources are selected by unique run and case labels. Interrupted cases are `UNRESOLVED`; Docker or executable startup failures and memory-limit kills are `INFRASTRUCTURE_ERROR`.
 
 Reports:

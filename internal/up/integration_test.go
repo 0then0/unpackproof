@@ -432,6 +432,131 @@ sys.exit(subprocess.call([%s]+sys.argv[1:]))
 	}
 	assertNoOwnedResources(t, r.RunID)
 }
+func TestIntegrationRecoveryAfterReportFilesystemFailure(t *testing.T) {
+	for _, recoveryAvailable := range []bool{true, false} {
+		name := "recovery-succeeds"
+		if !recoveryAvailable {
+			name = "all-storage-unavailable"
+		}
+		t.Run(name, func(t *testing.T) {
+			realDocker, err := exec.LookPath("docker")
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			out := integrationOut(t, "lost-output")
+			recoveryDir := filepath.Join(dir, "recovery")
+			if recoveryAvailable {
+				err = os.Mkdir(recoveryDir, 0700)
+			} else {
+				err = os.WriteFile(recoveryDir, nil, 0600)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("TMPDIR", recoveryDir)
+			witness := filepath.Join(dir, "before-cleanup.json")
+			dockerPath, _ := json.Marshal(realDocker)
+			outputPath, _ := json.Marshal(out)
+			witnessPath, _ := json.Marshal(witness)
+			wrapper := fmt.Sprintf(`#!/usr/bin/env python3
+import glob,json,os,subprocess,sys
+out=%s
+if sys.argv[1]=='rm' and os.path.isdir(os.environ['TMPDIR']):
+ paths=glob.glob(os.path.join(os.environ['TMPDIR'],'unpackproof-recovery-*','run.json'))
+ assert len(paths)==1
+ with open(paths[0]) as f: report=json.load(f)
+ assert report['cases'][-1]['observed']['root']
+ assert not report['cases'][-1]['cleanup']['attempted']
+ with open(%s,'w') as f: json.dump(report,f)
+code=subprocess.call([%s]+sys.argv[1:])
+if sys.argv[1]=='start' and os.path.isdir(out):
+ os.rename(out,out+'.initial')
+ with open(out,'w') as f: f.write('filesystem unavailable')
+sys.exit(code)
+`, outputPath, witnessPath, dockerPath)
+			if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(wrapper), 0755); err != nil {
+				t.Fatal(err)
+			}
+			originalPATH := os.Getenv("PATH")
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+originalPATH)
+			cfg := integrationConfig()
+			cfg.Cases = []string{"file", "nested"}
+			configPath := filepath.Join(dir, "config.json")
+			if err := SaveJSON(configPath, cfg); err != nil {
+				t.Fatal(err)
+			}
+			binary := os.Getenv("UNPACKPROOF_CLI")
+			if binary == "" {
+				t.Fatal("set UNPACKPROOF_CLI to the host binary")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cancel()
+			var human bytes.Buffer
+			cmd := exec.CommandContext(ctx, binary, "run", "--config", configPath, "--guest", integrationGuest(t), "--out", out)
+			cmd.Stdout, cmd.Stderr = &human, &human
+			var exitErr *exec.ExitError
+			if err := cmd.Run(); !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || ctx.Err() != nil {
+				t.Fatalf("expected CLI exit 1 on persistence failure: %v %s", err, human.String())
+			}
+			initial := readRun(t, out+".initial")
+			if recoveryAvailable {
+				paths, err := filepath.Glob(filepath.Join(recoveryDir, "unpackproof-recovery-*", "run.json"))
+				if err != nil || len(paths) != 1 {
+					t.Fatalf("missing recovery checkpoint: %v %v", paths, err)
+				}
+				r := readRun(t, filepath.Dir(paths[0]))
+				if len(r.Cases) != 1 || r.Cases[0].Outcome != OutcomePASS || r.Cases[0].ReportError == "" || !r.Cases[0].Cleanup.OK || r.Cases[0].RecoveryReport != paths[0] || r.FinishedAt.IsZero() || r.Image.ID == "" || len(r.Errors) == 0 {
+					t.Fatalf("incomplete recovery report or further cases executed: %#v", r)
+				}
+				data, err := os.ReadFile(witness)
+				if err != nil {
+					t.Fatal("cleanup happened without saved evidence", err)
+				}
+				var before RunReport
+				if err := json.Unmarshal(data, &before); err != nil || len(before.Cases) != 1 || before.Cases[0].Cleanup.Attempted || len(before.Cases[0].Observed.Objects) != 1 || before.Cases[0].Observed.Objects[0].SHA256 != r.Cases[0].Observed.Objects[0].SHA256 {
+					t.Fatalf("evidence was not saved before cleanup: %s %v", data, err)
+				}
+				if !strings.Contains(human.String(), "recovery-report:") || !strings.Contains(human.String(), paths[0]) {
+					t.Fatal("recovery path missing from human output", human.String())
+				}
+				assertNoOwnedResources(t, r.RunID)
+			} else {
+				defer func() {
+					t.Setenv("PATH", originalPATH)
+					runner := dockerRunner{runID: initial.RunID}
+					if cleanup := runner.cleanupCase("file"); !cleanup.OK {
+						t.Error(cleanup.Error)
+					}
+				}()
+				if !strings.Contains(human.String(), "cleanup deferred") || !strings.Contains(human.String(), "recovery report persistence failed") {
+					t.Fatal("total failure not reported", human.String())
+				}
+				var targets bytes.Buffer
+				if err := docker(ctx, &targets, nil, "ps", "-q", "--filter", "label=org.unpackproof.run="+initial.RunID, "--filter", "name=-target"); err != nil || targets.Len() != 0 {
+					t.Fatalf("running target retained: %q %v", targets.String(), err)
+				}
+				var volumes bytes.Buffer
+				if err := docker(ctx, &volumes, nil, "volume", "ls", "-q", "--filter", "label=org.unpackproof.run="+initial.RunID); err != nil || len(strings.Fields(volumes.String())) != 1 {
+					t.Fatalf("evidence removed or more cases executed: %q %v", volumes.String(), err)
+				}
+				var retained bytes.Buffer
+				if err := docker(ctx, &retained, nil, "exec", "unpackproof-"+initial.RunID+"-file-keeper", "/unpackproof-guest", "snapshot", "--root", "/fixture", "--subpath", "destination"); err != nil {
+					t.Fatal("keeper did not retain the tmpfs fixture", err)
+				}
+				var snapshot SnapshotResult
+				spec, err := BuildCase("file", initial.Config.LinkPolicy, initial.Config.OverwritePolicy)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := decodeSnapshot(retained.Bytes(), &snapshot); err != nil || !snapshot.Complete || len(snapshot.Objects) != 1 || snapshot.Objects[0].Path != "hello.txt" || snapshot.Objects[0].SHA256 != spec.Expected.Objects[0].SHA256 {
+					t.Fatalf("retained fixture lost its evidence: %s %v", retained.String(), err)
+				}
+			}
+		})
+	}
+}
+
 func TestIntegrationCleanupHasDeadline(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "docker")
