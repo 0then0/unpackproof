@@ -131,6 +131,28 @@ func TestDecodeSnapshotRejectsMalformedEvidence(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeSnapshotRejectsContradictoryAbsence(t *testing.T) {
+	base := SnapshotResult{RootMissing: true, Complete: true, Objects: []ObservedObject{}, FixtureRoot: &ObservedObject{Path: ".", Type: "dir", Dev: 1, Ino: 1}}
+	for _, mutate := range []func(*SnapshotResult){
+		func(s *SnapshotResult) { s.Root = &ObservedObject{Path: ".", Type: "dir"} },
+		func(s *SnapshotResult) { s.Objects = []ObservedObject{{Path: "x", Type: "dir"}} },
+		func(s *SnapshotResult) { s.Complete = false; s.Incomplete = "limit exceeded" },
+		func(s *SnapshotResult) { s.Incomplete = "error" },
+		func(s *SnapshotResult) { s.FixtureRoot = nil },
+		func(s *SnapshotResult) { s.FixtureRoot = &ObservedObject{Path: ".", Type: "dir"} },
+	} {
+		s := base
+		mutate(&s)
+		data, err := json.Marshal(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := decodeSnapshot(data, new(SnapshotResult)); err == nil {
+			t.Fatalf("contradictory absence accepted: %s", data)
+		}
+	}
+}
 func TestRunIDsAreDistinct(t *testing.T) {
 	seen := map[string]bool{}
 	for i := 0; i < 100; i++ {

@@ -16,7 +16,10 @@ jobs:
       - name: Unit tests
         run: |
           go test ./...
+          go test -race ./...
           go vet ./...
+      - name: Installation outside checkout (local replace)
+        run: sh scripts/install-smoke.sh
       - name: Build CLIs
         run: |
           go build -o bin/unpackproof ./cmd/unpackproof

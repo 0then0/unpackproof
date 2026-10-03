@@ -1,0 +1,18 @@
+{
+  "schema_version": "unpackproof.config.v1",
+  "name": "python-cli",
+  "image": "unpackproof/python-tarfile:0.1",
+  "command": ["python3", "-m", "tarfile", "-e", "{archive}", "{destination}"],
+  "target_version_command": ["python3", "--version"],
+  "cases": [],
+  "link_policy": "allow",
+  "overwrite_policy": "replace",
+  "limits": {
+    "timeout": "10s",
+    "memory": "256m",
+    "cpus": "1",
+    "pids": 64,
+    "storage_tmpfs": "16m",
+    "max_captured_output": 65536
+  }
+}

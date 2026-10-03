@@ -1,0 +1,18 @@
+{
+  "schema_version": "unpackproof.config.v1",
+  "name": "gnu-tar",
+  "image": "unpackproof/python-tarfile:0.1",
+  "command": ["tar", "-xf", "{archive}", "-C", "{destination}"],
+  "target_version_command": ["tar", "--version"],
+  "cases": [],
+  "link_policy": "allow",
+  "overwrite_policy": "replace",
+  "limits": {
+    "timeout": "10s",
+    "memory": "256m",
+    "cpus": "1",
+    "pids": 64,
+    "storage_tmpfs": "16m",
+    "max_captured_output": 65536
+  }
+}

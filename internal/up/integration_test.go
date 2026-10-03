@@ -117,6 +117,212 @@ func TestIntegrationRealAPIs(t *testing.T) {
 		})
 	}
 }
+
+func TestIntegrationCompatibilityCLIs(t *testing.T) {
+	for _, name := range []string{"gnu-tar", "python-cli"} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := LoadConfig(filepath.Join("..", "..", "configs", name+".json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.LinkPolicy != "allow" || cfg.OverwritePolicy != "replace" || len(cfg.Cases) != len(AllCases())-1 {
+				t.Fatalf("compatibility suite must use the default allow/replace corpus: %#v", cfg)
+			}
+			r, err := runIntegration(t, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.Image.ID == "" || r.TargetVersion == "" {
+				t.Fatalf("missing provenance: %#v", r)
+			}
+			for _, c := range r.Cases {
+				requireCase(t, r, c.Case.ID, OutcomePASS, "")
+				if c.Execution.Disposition != "completed" || (c.Case.ID == "truncated" && c.Execution.ExitCode == 0) {
+					t.Fatalf("extraction must complete and detect truncation: %#v", c.Execution)
+				}
+			}
+		})
+	}
+}
+
+func TestIntegrationMissingRoots(t *testing.T) {
+	for _, subpath := range []string{"destination", "protected"} {
+		t.Run(subpath, func(t *testing.T) {
+			realDocker, err := exec.LookPath("docker")
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			out := integrationOut(t, "run")
+			witness := filepath.Join(dir, "before-cleanup.json")
+			// Capture the actual absence evidence before destructive cleanup.
+			dockerPath, _ := json.Marshal(realDocker)
+			reportPath, _ := json.Marshal(filepath.Join(out, "run.json"))
+			witnessPath, _ := json.Marshal(witness)
+			field := "observed"
+			if subpath == "protected" {
+				field = "protected"
+			}
+			wrapper := fmt.Sprintf(`#!/usr/bin/env python3
+import json,subprocess,sys
+if sys.argv[1]=='rm':
+ with open(%s) as f: report=json.load(f)
+ case=report['cases'][-1]
+ snapshot=case[%q]
+ assert case['outcome']=='FAIL' and not case['cleanup']['attempted']
+ assert snapshot['root_missing'] and snapshot['root'] is None and snapshot['complete']
+ assert snapshot['fixture_root']==case['protected_before']['fixture_root']
+ with open(%s,'w') as f: json.dump(report,f)
+sys.exit(subprocess.call([%s]+sys.argv[1:]))
+`, reportPath, field, witnessPath, dockerPath)
+			if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(wrapper), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			cfg := integrationConfig()
+			script := "import os;os.rmdir('/fixture/destination')"
+			if subpath == "protected" {
+				script = "import tarfile,shutil;tarfile.open('/fixture/input/archive.tar').extractall('/fixture/destination',filter='data');shutil.rmtree('/fixture/protected')"
+			}
+			cfg.Command = []string{"python3", "-c", script}
+			r, err := runIntegration(t, cfg)
+			if err == nil {
+				t.Fatal("missing root passed")
+			}
+			c := requireCase(t, r, "file", OutcomeFAIL, "missing-"+subpath+"-root")
+			if c.Execution.Disposition != "completed" || c.Execution.ExitCode != 0 || c.Completeness != "complete" {
+				t.Fatalf("incorrect execution or completeness: %#v", c)
+			}
+			if subpath == "protected" && (len(c.Observed.Objects) != 1 || c.Observed.Objects[0].SHA256 != c.Expected.Objects[0].SHA256) {
+				t.Fatal("protected deletion test did not extract the expected bytes")
+			}
+			data, err := os.ReadFile(witness)
+			if err != nil {
+				t.Fatal("missing evidence before cleanup", err)
+			}
+			var before RunReport
+			if err := json.Unmarshal(data, &before); err != nil || len(before.Cases) != 1 || before.Cases[0].Cleanup.Attempted {
+				t.Fatalf("invalid pre-cleanup checkpoint: %s %v", data, err)
+			}
+			data, err = os.ReadFile(filepath.Join(out, "file.json"))
+			var saved CaseReport
+			if err != nil || json.Unmarshal(data, &saved) != nil || saved.Outcome != OutcomeFAIL || !saved.Cleanup.OK || saved.Observed.RootMissing != c.Observed.RootMissing || saved.Protected.RootMissing != c.Protected.RootMissing {
+				t.Fatalf("case evidence or cleanup lost: %s %v", data, err)
+			}
+		})
+	}
+}
+
+func TestIntegrationObservationFailures(t *testing.T) {
+	for _, mode := range []string{"observer-error", "fixture-unmounted", "incomplete"} {
+		t.Run(mode, func(t *testing.T) {
+			realDocker, err := exec.LookPath("docker")
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			dockerPath, _ := json.Marshal(realDocker)
+			wrapper := fmt.Sprintf(`#!/usr/bin/env python3
+import json,subprocess,sys
+args=sys.argv[1:]
+if 'snapshot' in args and args[-1]=='destination':
+ mode=%q
+ if mode=='observer-error':
+  sys.stderr.write('lstat /fixture/destination: no such file or directory\n')
+  sys.exit(1)
+ if mode=='fixture-unmounted':
+  i=next(i for i,a in enumerate(args) if a.endswith(':/fixture'))
+  del args[i-1:i+1]
+ if mode=='incomplete':
+  s=json.loads(subprocess.check_output([%s]+args))
+  s['complete']=False
+  s['incomplete_reason']='controlled observation limit'
+  print(json.dumps(s))
+  sys.exit(0)
+sys.exit(subprocess.call([%s]+args))
+`, mode, dockerPath, dockerPath)
+			if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(wrapper), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			cfg := integrationConfig()
+			if mode != "incomplete" {
+				cfg.Command = []string{"python3", "-c", "import os;os.rmdir('/fixture/destination')"}
+			}
+			r, err := runIntegration(t, cfg)
+			if err == nil {
+				t.Fatal("observation failure passed")
+			}
+			outcome, finding := OutcomeInfrastructureError, "infrastructure-snapshot-destination"
+			if mode == "incomplete" {
+				outcome, finding = OutcomeUNRESOLVED, "incomplete-observation"
+			}
+			c := requireCase(t, r, "file", outcome, finding)
+			if c.Completeness != "incomplete" {
+				t.Fatal("failed observation marked complete")
+			}
+		})
+	}
+}
+
+func TestIntegrationMissingRootDuringTimeoutAndInterruption(t *testing.T) {
+	for _, interrupted := range []bool{false, true} {
+		name := "timeout"
+		if interrupted {
+			name = "interruption"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := integrationConfig()
+			cfg.Command = []string{"python3", "-c", "import os,time;os.rmdir('/fixture/destination');print('removed',flush=True);time.sleep(30)"}
+			cfg.Limits.Timeout.Duration = 2 * time.Second
+			out := integrationOut(t, "run")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if interrupted {
+				// Cancel only after a running target has removed the disposable root.
+				go func() {
+					deadline := time.Now().Add(15 * time.Second)
+					for time.Now().Before(deadline) && ctx.Err() == nil {
+						var b bytes.Buffer
+						if data, err := os.ReadFile(filepath.Join(out, "run.json")); err == nil {
+							var r RunReport
+							if json.Unmarshal(data, &r) == nil {
+								checkCtx, stop := context.WithTimeout(ctx, time.Second)
+								err := docker(checkCtx, &b, nil, "inspect", "unpackproof-"+r.RunID+"-file-target", "--format", "{{.State.Running}}")
+								if err == nil && strings.TrimSpace(b.String()) == "true" {
+									b.Reset()
+									err = docker(checkCtx, &b, nil, "exec", "unpackproof-"+r.RunID+"-file-keeper", "/unpackproof-guest", "snapshot", "--root", "/fixture", "--subpath", "destination")
+								}
+								stop()
+								var s SnapshotResult
+								if err == nil && decodeSnapshot(b.Bytes(), &s) == nil && s.RootMissing {
+									cancel()
+									return
+								}
+							}
+						}
+						time.Sleep(50 * time.Millisecond)
+					}
+				}()
+				cfg.Limits.Timeout.Duration = 20 * time.Second
+			}
+			err := Run(ctx, cfg, integrationGuest(t), out, &bytes.Buffer{})
+			if err == nil {
+				t.Fatal("incomplete execution passed")
+			}
+			r := readRun(t, out)
+			finding := "execution-timeout"
+			if interrupted {
+				finding = "execution-interrupted"
+			}
+			c := requireCase(t, r, "file", OutcomeUNRESOLVED, finding)
+			if !c.Observed.RootMissing {
+				t.Fatal("missing root evidence lost after incomplete execution")
+			}
+			assertNoOwnedResources(t, r.RunID)
+		})
+	}
+}
 func TestIntegrationInvocationAndPositiveControl(t *testing.T) {
 	t.Run("missing-executable", func(t *testing.T) {
 		cfg := integrationConfig()

@@ -20,10 +20,12 @@ type SnapshotLimit struct {
 }
 
 type SnapshotResult struct {
-	Root       *ObservedObject  `json:"root"`
-	Objects    []ObservedObject `json:"objects"`
-	Complete   bool             `json:"complete"`
-	Incomplete string           `json:"incomplete_reason,omitempty"`
+	RootMissing bool             `json:"root_missing,omitempty"`
+	FixtureRoot *ObservedObject  `json:"fixture_root,omitempty"`
+	Root        *ObservedObject  `json:"root"`
+	Objects     []ObservedObject `json:"objects"`
+	Complete    bool             `json:"complete"`
+	Incomplete  string           `json:"incomplete_reason,omitempty"`
 }
 
 type ObservedObject struct {
@@ -37,14 +39,20 @@ type ObservedObject struct {
 	Ino        uint64 `json:"ino,omitempty"`
 }
 
-func Snapshot(root string, limit SnapshotLimit) (SnapshotResult, error) {
+func Snapshot(root string, limit SnapshotLimit) (out SnapshotResult, err error) {
+	defer func() {
+		if err != nil {
+			out.Complete = false
+			out.Incomplete = err.Error()
+		}
+	}()
 	if limit.MaxEntries <= 0 {
 		limit.MaxEntries = 2048
 	}
 	if limit.MaxFileBytes <= 0 {
 		limit.MaxFileBytes = 8 << 20
 	}
-	out := SnapshotResult{Complete: true, Objects: []ObservedObject{}}
+	out = SnapshotResult{Complete: true, Objects: []ObservedObject{}}
 	info, err := os.Lstat(root)
 	if err != nil {
 		return out, err
@@ -127,6 +135,72 @@ func Snapshot(root string, limit SnapshotLimit) (SnapshotResult, error) {
 	return out, err
 }
 
+// SnapshotFixture observes a direct child of an accessible fixture. Only the
+// initial Lstat of that child can establish absence; errors during traversal,
+// hashing, fixture access or identity checks remain observation failures.
+func SnapshotFixture(fixture, subpath string, limit SnapshotLimit) (SnapshotResult, error) {
+	if !oneOf(subpath, "destination", "protected") {
+		return SnapshotResult{}, errors.New("snapshot requires destination or protected")
+	}
+	before, err := observeFixtureRoot(fixture)
+	if err != nil {
+		return SnapshotResult{}, fmt.Errorf("fixture unavailable: %w", err)
+	}
+	root := filepath.Join(fixture, subpath)
+	out, snapshotErr := Snapshot(root, limit)
+	var pathErr *os.PathError
+	missing := out.Root == nil && errors.As(snapshotErr, &pathErr) &&
+		pathErr.Op == "lstat" && pathErr.Path == root && errors.Is(pathErr.Err, syscall.ENOENT)
+	if snapshotErr != nil && !missing {
+		return out, snapshotErr
+	}
+	after, err := observeFixtureRoot(fixture)
+	if err != nil || !sameIdentity(before, after) {
+		out.Complete = false
+		return out, fmt.Errorf("fixture unavailable or replaced during observation: %v", err)
+	}
+	out.FixtureRoot = after
+	if missing {
+		out.RootMissing = true
+		out.Complete = true
+		out.Incomplete = ""
+	}
+	return out, nil
+}
+
+func observeFixtureRoot(root string) (*ObservedObject, error) {
+	info, err := os.Lstat(root)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, errors.New("fixture root must be a directory, not a symlink")
+	}
+	f, err := os.Open(root)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return nil, errors.New("fixture identity changed while opening directory")
+	}
+	// Check directory access without an unbounded listing of target output.
+	if _, err := f.Readdirnames(1); err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	st, ok := opened.Sys().(*syscall.Stat_t)
+	if !ok || st.Dev == 0 || st.Ino == 0 {
+		return nil, errors.New("fixture identity unavailable")
+	}
+	return &ObservedObject{Path: ".", Type: "dir", Dev: uint64(st.Dev), Ino: uint64(st.Ino)}, nil
+}
+
+func sameIdentity(a, b *ObservedObject) bool {
+	return a != nil && b != nil && a.Type == "dir" && b.Type == "dir" &&
+		a.Dev != 0 && a.Ino != 0 && a.Dev == b.Dev && a.Ino == b.Ino
+}
+
 func permissionString(mode os.FileMode) string {
 	bits := uint32(mode.Perm())
 	if mode&os.ModeSetuid != 0 {
@@ -191,7 +265,9 @@ type Comparison struct {
 
 func Compare(spec CaseSpec, observed, protectedBefore, protected SnapshotResult, exitCode int, timedOut bool) Comparison {
 	c := Comparison{Complete: observed.Complete && protectedBefore.Complete && protected.Complete}
-	if observed.Root == nil {
+	if observed.RootMissing {
+		c.add("missing-destination-root", ".", "required destination root is absent")
+	} else if observed.Root == nil {
 		c.Complete = false
 		c.add("incomplete-observation", ".", "destination root was not observed")
 	} else if observed.Root.Type != "dir" {
@@ -202,6 +278,10 @@ func Compare(spec CaseSpec, observed, protectedBefore, protected SnapshotResult,
 	}
 	if !protected.Complete {
 		c.add("incomplete-protected-observation", "", protected.Incomplete)
+	}
+	if protectedBefore.Root == nil || protectedBefore.RootMissing {
+		c.Complete = false
+		c.add("incomplete-protected-baseline", "protected", "protected baseline root was not observed")
 	}
 	if timedOut {
 		c.add("execution-timeout", "", "target exceeded configured timeout")
@@ -263,7 +343,12 @@ func Compare(spec CaseSpec, observed, protectedBefore, protected SnapshotResult,
 			c.add("unexpected-object", path, "object was not part of expected tree")
 		}
 	}
-	if err := checkProtected(protectedBefore, protected); err != nil {
+	if protected.RootMissing {
+		c.add("missing-protected-root", "protected", "required protected root is absent")
+	} else if protected.Root == nil {
+		c.Complete = false
+		c.add("incomplete-protected-observation", "protected", "protected root was not observed")
+	} else if err := checkProtected(protectedBefore, protected); err != nil {
 		c.add("protected-changed", "protected", err.Error())
 	}
 	sort.Slice(c.Findings, func(i, j int) bool {
@@ -305,6 +390,15 @@ func checkProtected(before, after SnapshotResult) error {
 // ValidateSnapshot rejects malformed evidence instead of treating absent or
 // duplicated fields as an empty successful observation.
 func ValidateSnapshot(s SnapshotResult) error {
+	if s.FixtureRoot != nil && (s.FixtureRoot.Path != "." || !sameIdentity(s.FixtureRoot, s.FixtureRoot)) {
+		return errors.New("invalid fixture identity")
+	}
+	if s.RootMissing {
+		if s.Root != nil || len(s.Objects) != 0 || !s.Complete || s.Incomplete != "" || s.FixtureRoot == nil {
+			return errors.New("missing root requires complete absence evidence and fixture identity")
+		}
+		return nil
+	}
 	if s.Root == nil || s.Root.Path != "." || !oneOf(s.Root.Type, "dir", "file", "symlink", "special") {
 		return errors.New("snapshot root is missing or invalid")
 	}

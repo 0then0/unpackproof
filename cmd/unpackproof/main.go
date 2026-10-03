@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/unpackproof/unpackproof/internal/up"
+	"github.com/0then0/unpackproof/internal/up"
 )
 
 func main() {

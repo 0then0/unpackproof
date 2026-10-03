@@ -36,6 +36,10 @@ Outcomes:
 - `UNRESOLVED`: evidence was insufficient, including timeout or incomplete observation.
 - `INFRASTRUCTURE_ERROR`: setup, Docker invocation, runtime, or observation failed.
 
+In v0.1.1, a completed target that removes the required destination or protected root produces `FAIL` with `missing-destination-root` or `missing-protected-root`. The observer checks that the fixture directory is accessible before and after observation and that its device/inode identity matches the pre-execution baseline. Only `ENOENT` from the initial `Lstat` of the direct root establishes absence. Missing ancestors, unavailable or replaced mounts, traversal/read failures, invalid evidence and Docker failures remain observation/infrastructure errors. Timeout and interruption remain `UNRESOLVED`; memory-limit kills remain `INFRASTRUCTURE_ERROR`. Incomplete snapshots cannot establish a passing contract.
+
+The report schemas remain `unpackproof.report.v1` and `unpackproof.case-report.v1`. Snapshot evidence gains additive fields: `fixture_root` records the accessible fixture's directory identity, and `root_missing: true` records established root absence with `root: null`, `objects: []`, and `complete: true`. Here `complete` means absence was completely observed, not that an empty directory was observed. A null root without explicit absence evidence is invalid observation evidence. Readers that reject unknown fields must accept the new fields; existing root/object fields keep their meaning. Fixture identity must match the baseline before absence can determine a verdict. Reports are persisted before destructive cleanup, including these failure cases.
+
 ## Cases
 
 v0.1 includes stable synthetic cases:
@@ -59,6 +63,14 @@ Overwrite policy applies both to pre-existing files and repeated archive members
 The oracle compares declared permissions, symlink targets, hardlink identity, and the type of the destination root. Protected objects and their directory are compared with a baseline snapshot, including content, permissions, and device/inode identity.
 
 ## Build
+
+The Go module and installation path are `github.com/0then0/unpackproof`. After the v0.1.1 tag is published, install the host CLI with:
+
+```sh
+go install github.com/0then0/unpackproof/cmd/unpackproof@v0.1.1
+```
+
+Build the Linux guest binary separately as below. The prepared v0.1.1 source fixes the old module declaration; published v0.1.0 is unchanged and its repository installation path has a module mismatch. The command above requires publication of that tag and has not been verified against a published release. Until publication, build this checkout or run the local installation smoke test described below.
 
 ```sh
 go test ./...
@@ -92,6 +104,17 @@ bin/unpackproof run \
 ```
 
 Case reports and a complete run checkpoint are written before cleanup is attempted. They include image identity, target version when configured, the normalized command and limits, execution disposition, and filesystem evidence. Persistence or cleanup errors make the CLI return nonzero while retaining the observed case verdict. Use a separate output directory for each concurrent run.
+
+Ordinary GNU tar and the stock Python CLI can be tested directly, using the existing Python image without invoking its adapter:
+
+```sh
+# command: ["tar", "-xf", "{archive}", "-C", "{destination}"]
+bin/unpackproof run --config configs/gnu-tar.json --guest bin/unpackproof-guest-linux-arm64 --out reports/gnu-tar
+# command: ["python3", "-m", "tarfile", "-e", "{archive}", "{destination}"]
+bin/unpackproof run --config configs/python-cli.json --guest bin/unpackproof-guest-linux-arm64 --out reports/python-cli
+```
+
+Both configs select the default 10-case corpus with `link_policy: allow` and `overwrite_policy: replace`. They use no policy adapters and retain all expectations. On Linux arm64, the local `unpackproof/python-tarfile:0.1` image ID and repo digest were `sha256:b75246ced3181e6e5ce9ae355251caada3436193b41b1853ad7a715b77970371`, built from the pinned Python base listed above. GNU tar reported version 1.34; Python reported 3.14.0. Both passed all 10 cases. For `truncated`, GNU tar exited 2 and Python exited 1; the case passed because the contract expects detection of an extraction error, not successful extraction. These are measured versions, not claims about the latest releases. Image IDs may differ across architectures or rebuilds; each run records its actual image identity and tool version.
 
 If both primary report writes fail, a full checkpoint is saved in a private `unpackproof-recovery-*` directory under the OS temporary directory (`TMPDIR` when set). The human output and `recovery_report` field identify its path. The run stops after this case; cleanup proceeds only after evidence has been saved. Recovery files are retained for inspection, so copy them before temporary-directory cleanup. If recovery storage also fails, the target is stopped with a deadline and destructive cleanup is deferred. The reported run/case labels identify retained resources; the keeper still expires on its original deadline, after which tmpfs contents may be lost.
 
@@ -130,6 +153,9 @@ Useful local checks:
 
 ```sh
 go test ./...
+go test -race ./...
+go vet ./...
+sh scripts/install-smoke.sh
 go build -o bin/unpackproof ./cmd/unpackproof
 GOOS=linux GOARCH=$(go env GOARCH) CGO_ENABLED=0 go build -o bin/unpackproof-guest-linux-$(go env GOARCH) ./cmd/unpackproof-guest
 docker build -t unpackproof/python-tarfile:0.1 examples/python-tarfile
@@ -160,6 +186,16 @@ go test -tags=integration ./internal/up -count=1 -timeout=8m
 
 These tests cover real APIs, error-only suites, startup failures, policy combinations, permissions, protected identity, malformed evidence, bounded output and storage, interruption, timeout, persistence errors, cross-case isolation, concurrent runs, and cleanup ownership. GitHub Actions runs them on Linux amd64 and uploads reports even when assertions fail.
 
+The integration suite also runs both direct compatibility configs, missing-root regressions with pre-cleanup evidence checks, observer errors, unavailable fixture mounts, incomplete observation, and missing roots during timeout/interruption. To run just the compatibility checks with the same environment variables:
+
+```sh
+go test -tags=integration ./internal/up -run '^TestIntegrationCompatibilityCLIs$' -count=1 -timeout=2m
+```
+
+`scripts/install-smoke.sh` verifies the module declaration, installs both commands from a separate temporary module using `replace` to this checkout, and runs the installed host CLI's `cases` and `schema` commands. It removes its own temporary directory afterward. This checks local installation/import resolution outside the checkout; it does not check publication, a Go module proxy, a remote tag, or Linux guest cross-compilation. CI runs it alongside unit/race tests and the existing Docker suite, without adding a platform matrix.
+
 ## Limitations
 
 v0.1 intentionally does not cover ZIP/RAR/7z, Windows paths, hostile executables, concurrent filesystem races, fuzzing, archive bombs, historical vulnerable releases, or arbitrary untrusted payload generation. It validates synthetic TAR extraction behavior by final filesystem state and bounded evidence.
+
+A `PASS` on this small corpus is not proof of full TAR conformance or extractor safety. Fixture identity checks establish availability for these final snapshots; they do not trace temporary filesystem mutations or eliminate races from concurrently running processes.

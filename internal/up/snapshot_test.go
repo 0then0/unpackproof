@@ -2,10 +2,84 @@ package up
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestSnapshotFixtureMissingRoot(t *testing.T) {
+	fixture := t.TempDir()
+	for _, name := range []string{"destination", "protected"} {
+		s, err := SnapshotFixture(fixture, name, SnapshotLimit{})
+		if err != nil || !s.RootMissing || s.Root != nil || !s.Complete || s.Incomplete != "" || s.FixtureRoot == nil || len(s.Objects) != 0 {
+			t.Fatalf("absence evidence lost: %#v %v", s, err)
+		}
+		data, err := json.Marshal(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded SnapshotResult
+		if err := decodeSnapshot(data, &decoded); err != nil || !decoded.RootMissing {
+			t.Fatalf("absence evidence rejected: %s %v", data, err)
+		}
+	}
+	// Generic snapshots cannot infer fixture availability from arbitrary ENOENT.
+	if s, err := Snapshot(filepath.Join(fixture, "missing", "destination"), SnapshotLimit{}); !errors.Is(err, os.ErrNotExist) || s.Complete || s.RootMissing {
+		t.Fatalf("unknown ancestor treated as absence: %#v %v", s, err)
+	}
+}
+
+func TestSnapshotFixtureUnavailable(t *testing.T) {
+	parent := t.TempDir()
+	file := filepath.Join(parent, "file")
+	if err := os.WriteFile(file, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(parent, "link")
+	if err := os.Symlink(parent, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, fixture := range []string{filepath.Join(parent, "missing"), file, link} {
+		if s, err := SnapshotFixture(fixture, "destination", SnapshotLimit{}); err == nil || s.RootMissing || s.Complete {
+			t.Fatalf("unavailable fixture accepted: %#v %v", s, err)
+		}
+	}
+	if s, err := SnapshotFixture(parent, "missing/destination", SnapshotLimit{}); err == nil || s.RootMissing {
+		t.Fatalf("arbitrary path accepted: %#v %v", s, err)
+	}
+}
+
+func TestCompareMissingRootsAndIncompleteEvidence(t *testing.T) {
+	spec, _ := BuildCase("file", "allow", "replace")
+	absent, err := SnapshotFixture(t.TempDir(), "destination", SnapshotLimit{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, protectedMissing := range []bool{false, true} {
+		o, p := absent, protectedTree()
+		id := "missing-destination-root"
+		if protectedMissing {
+			o, p = observedTree(expectedFile()), absent
+			id = "missing-protected-root"
+		}
+		c := Compare(spec, o, protectedTree(), p, 0, false)
+		assertFinding(t, c, id)
+		if !c.Complete {
+			t.Fatalf("known absence marked incomplete: %#v", c)
+		}
+	}
+	unknown := SnapshotResult{Complete: true}
+	for _, c := range []Comparison{
+		Compare(spec, unknown, protectedTree(), protectedTree(), 0, false),
+		Compare(spec, observedTree(expectedFile()), protectedTree(), unknown, 0, false),
+		Compare(spec, absent, unknown, protectedTree(), 0, false),
+	} {
+		if c.Complete {
+			t.Fatalf("unobserved root treated as complete: %#v", c)
+		}
+	}
+}
 
 func observedTree(objects ...ObservedObject) SnapshotResult {
 	return SnapshotResult{Root: &ObservedObject{Path: ".", Type: "dir", Mode: "0755", Dev: 1, Ino: 1}, Complete: true, Objects: objects}

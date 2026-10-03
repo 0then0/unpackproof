@@ -146,6 +146,9 @@ func (r *dockerRunner) runCase(ctx context.Context, id, outDir string) CaseRepor
 	if err := r.snapshot(ctx, id, vol, "protected", &cr.ProtectedBefore); err != nil {
 		return finish(infraReport(cr, "snapshot-protected-before", err))
 	}
+	if cr.ProtectedBefore.RootMissing || cr.ProtectedBefore.Root.Type != "dir" || !cr.ProtectedBefore.Complete || cr.ProtectedBefore.FixtureRoot == nil {
+		return finish(infraReport(cr, "snapshot-protected-before", errors.New("protected baseline or fixture identity unavailable")))
+	}
 	cr.Execution = r.execute(ctx, id, vol, r.cfg.Command)
 	// Observation and cleanup remain possible after target timeout or interruption.
 	observeCtx, cancel := context.WithTimeout(context.Background(), observationTimeout)
@@ -153,8 +156,14 @@ func (r *dockerRunner) runCase(ctx context.Context, id, outDir string) CaseRepor
 	if err := r.snapshot(observeCtx, id, vol, "destination", &cr.Observed); err != nil {
 		return finish(infraReport(cr, "snapshot-destination", err))
 	}
+	if !sameIdentity(cr.ProtectedBefore.FixtureRoot, cr.Observed.FixtureRoot) {
+		return finish(infraReport(cr, "snapshot-destination", errors.New("fixture identity changed or unavailable")))
+	}
 	if err := r.snapshot(observeCtx, id, vol, "protected", &cr.Protected); err != nil {
 		return finish(infraReport(cr, "snapshot-protected", err))
+	}
+	if !sameIdentity(cr.ProtectedBefore.FixtureRoot, cr.Protected.FixtureRoot) {
+		return finish(infraReport(cr, "snapshot-protected", errors.New("fixture identity changed or unavailable")))
 	}
 	comp := Compare(spec, cr.Observed, cr.ProtectedBefore, cr.Protected, cr.Execution.ExitCode, cr.Execution.TimedOut)
 	cr.Findings = comp.Findings

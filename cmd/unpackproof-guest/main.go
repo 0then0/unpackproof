@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/unpackproof/unpackproof/internal/up"
+	"github.com/0then0/unpackproof/internal/up"
 )
 
 func main() {
@@ -54,7 +54,7 @@ func run(args []string) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		snap, err := up.Snapshot(filepath.Join(*root, *subpath), up.SnapshotLimit{MaxEntries: 2048, MaxFileBytes: 8 << 20})
+		snap, err := up.SnapshotFixture(*root, *subpath, up.SnapshotLimit{MaxEntries: 2048, MaxFileBytes: 8 << 20})
 		if err != nil {
 			return err
 		}
