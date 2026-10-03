@@ -12,7 +12,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Unit tests
         run: |
           go test ./...
@@ -33,7 +33,7 @@ jobs:
         run: go test -tags=integration ./internal/up -count=1 -timeout=8m
       - name: Upload reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: unpackproof-reports
           path: reports/
